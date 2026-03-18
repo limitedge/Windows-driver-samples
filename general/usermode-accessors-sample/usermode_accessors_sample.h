@@ -22,7 +22,14 @@ Environment:
 
 #include <ntddk.h>
 #include <wdf.h>
+#include <initguid.h>
 #include <usermode_accessors.h>
+
+//
+// Device interface GUID for the UMA sample driver.
+//
+DEFINE_GUID(GUID_DEVINTERFACE_UMA_SAMPLE,
+    0x7a4c6a3e, 0x2f8b, 0x4d5c, 0x9e, 0x1a, 0x3b, 0x6c, 0x8d, 0x4e, 0x2f, 0x0a);
 
 //
 // Pool tag for allocations: 'UmAs'
@@ -113,15 +120,12 @@ WDF_DECLARE_CONTEXT_TYPE_WITH_NAME(DEVICE_CONTEXT, DeviceGetContext)
 //
 // Shared structures for IOCTLs
 //
-#pragma pack(push, 1)
-
 typedef struct _UMA_READ_VALUES_INPUT {
     UCHAR   UCharValue;
     USHORT  UShortValue;
     ULONG   ULongValue;
     ULONG64 ULong64Value;
     BOOLEAN BoolValue;
-    HANDLE  HandleValue;
 } UMA_READ_VALUES_INPUT, *PUMA_READ_VALUES_INPUT;
 
 typedef struct _UMA_READ_VALUES_OUTPUT {
@@ -162,6 +166,11 @@ typedef struct _UMA_INTERLOCKED_OUTPUT {
     LONG64 CmpXchgResult64;
 } UMA_INTERLOCKED_OUTPUT, *PUMA_INTERLOCKED_OUTPUT;
 
+typedef struct _UMA_STRING_INPUT {
+    CHAR  AnsiString[128];
+    WCHAR WideString[128];
+} UMA_STRING_INPUT, *PUMA_STRING_INPUT;
+
 typedef struct _UMA_STRING_LENGTH_OUTPUT {
     SIZE_T AnsiLength;
     SIZE_T WideLength;
@@ -178,8 +187,6 @@ typedef struct _UMA_MODE_INPUT {
     KPROCESSOR_MODE Mode;
     ULONG           Value;
 } UMA_MODE_INPUT, *PUMA_MODE_INPUT;
-
-#pragma pack(pop)
 
 //
 // Function prototypes

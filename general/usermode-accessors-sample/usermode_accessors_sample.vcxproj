@@ -28,6 +28,8 @@
     <RootNamespace>usermode_accessors_sample</RootNamespace>
     <DriverType>KMDF</DriverType>
     <KMDF_VERSION_MAJOR>1</KMDF_VERSION_MAJOR>
+    <ImportDirectoryBuildProps>false</ImportDirectoryBuildProps>
+    <WindowsTargetPlatformVersion>10.0.26100.0</WindowsTargetPlatformVersion>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
   <PropertyGroup Condition="'$(Configuration)'=='Debug'" Label="Configuration">
@@ -53,6 +55,7 @@
   <PropertyGroup Label="UserMacros" />
   <PropertyGroup>
     <DebuggerFlavor>DbgengKernelDebugger</DebuggerFlavor>
+    <InfVerifEnabled>false</InfVerifEnabled>
   </PropertyGroup>
   <ItemDefinitionGroup>
     <ClCompile>
@@ -61,7 +64,8 @@
     </ClCompile>
     <Inf>
       <SpecifyDriverVerDirectiveVersion>true</SpecifyDriverVerDirectiveVersion>
-      <TimeStamp>$(STAMPINF_DATE)</TimeStamp>
+      <DriverVerDirectiveVersion>1.0.0.0</DriverVerDirectiveVersion>
+      <TimeStamp>*</TimeStamp>
     </Inf>
   </ItemDefinitionGroup>
   <ItemGroup>

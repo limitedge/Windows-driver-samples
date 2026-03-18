@@ -8,22 +8,23 @@ Module Name:
 
 Abstract:
 
-    A KMDF sample driver demonstrating safe user-mode memory access using
-    the usermode_accessors.h DDI family. This driver creates a device that
-    handles IOCTLs to exercise the following DDI categories:
+    KMDF sample driver demonstrating safe kernel-to-user and user-to-kernel
+    memory access using the usermode_accessors.h API family.
 
-    - CopyFromUser / CopyToUser (and NonTemporal, Aligned variants)
-    - CopyFromMode / CopyToMode (mode-dependent access)
-    - ReadXxxFromUser / WriteXxxToUser (typed safe reads/writes)
-    - ReadXxxFromMode / WriteXxxToMode (mode-dependent typed access)
-    - FillUserMemory / FillModeMemory / SetUserMemory
-    - InterlockedXxxToUser (atomic operations on user memory)
-    - StringLengthFromUser / WideStringLengthFromUser
-    - ReadStructFromUser / WriteStructToUser
-    - UmaExceptionFilter
+    All usermode_accessors functions raise SEH exceptions on invalid access
+    rather than returning error codes. Callers must wrap them in __try/__except
+    and use UmaExceptionFilter() as the exception filter.
 
-    All functions use structured exception handling (__try/__except) to
-    safely handle invalid user-mode pointers.
+    API patterns demonstrated:
+      - ReadXxxFromUser   : returns value directly, 1 param (source pointer)
+      - WriteXxxToUser    : void return, 2 params (dest pointer, value)
+      - CopyFromUser/To   : void return, 3 params (dest, src, length)
+      - FillUserMemory    : void return, 3 params (dest, length, fill)
+      - StringLengthFromUser / WideStringLengthFromUser : returns SIZE_T, 1 param
+      - InterlockedXxxToUser : returns previous value (LONG/LONG64)
+      - ReadStructFromUser / WriteStructToUser : macros (statement-only)
+      - ReadULongFromMode / WriteULongToMode / CopyFromMode : mode-aware variants
+      - UmaExceptionFilter : takes only KPROCESSOR_MODE
 
 Environment:
 
@@ -33,41 +34,32 @@ Environment:
 
 #include "usermode_accessors_sample.h"
 
+//
+// Forward declarations for IOCTL handlers
+//
+static NTSTATUS HandleReadValues(_In_ WDFREQUEST Request);
+static NTSTATUS HandleWriteValues(_In_ WDFREQUEST Request);
+static NTSTATUS HandleCopyBuffer(_In_ WDFREQUEST Request);
+static NTSTATUS HandleFillBuffer(_In_ WDFREQUEST Request);
+static NTSTATUS HandleInterlockedOps(_In_ WDFREQUEST Request);
+static NTSTATUS HandleStringLength(_In_ WDFREQUEST Request);
+static NTSTATUS HandleStructAccess(_In_ WDFREQUEST Request);
+static NTSTATUS HandleModeOperations(_In_ WDFREQUEST Request);
+
 #ifdef ALLOC_PRAGMA
 #pragma alloc_text(INIT, DriverEntry)
 #pragma alloc_text(PAGE, EvtDeviceAdd)
 #pragma alloc_text(PAGE, EvtIoDeviceControl)
 #endif
 
-//
-// {B4E6A7C8-3D2F-4A1E-9F5B-8C7D6E5F4A3B}
-// Device interface GUID for the usermode_accessors sample
-//
-DEFINE_GUID(GUID_DEVINTERFACE_UMA_SAMPLE,
-    0xb4e6a7c8, 0x3d2f, 0x4a1e, 0x9f, 0x5b, 0x8c, 0x7d, 0x6e, 0x5f, 0x4a, 0x3b);
-
-
+// -----------------------------------------------------------------------
+// DriverEntry
+// -----------------------------------------------------------------------
 NTSTATUS
 DriverEntry(
     _In_ PDRIVER_OBJECT  DriverObject,
     _In_ PUNICODE_STRING RegistryPath
     )
-/*++
-
-Routine Description:
-
-    DriverEntry initializes the driver and creates a WDFDRIVER object.
-
-Arguments:
-
-    DriverObject - Pointer to the driver object created by the I/O manager.
-    RegistryPath - Driver's registry path.
-
-Return Value:
-
-    NTSTATUS
-
---*/
 {
     WDF_DRIVER_CONFIG config;
     NTSTATUS status;
@@ -85,43 +77,24 @@ Return Value:
     return status;
 }
 
-
+// -----------------------------------------------------------------------
+// EvtDeviceAdd
+// -----------------------------------------------------------------------
 NTSTATUS
 EvtDeviceAdd(
     _In_ WDFDRIVER       Driver,
     _Inout_ PWDFDEVICE_INIT DeviceInit
     )
-/*++
-
-Routine Description:
-
-    Called by the framework when a new device instance is detected.
-    Creates the device object and I/O queue.
-
-Arguments:
-
-    Driver     - Handle to the WDFDRIVER object.
-    DeviceInit - Pointer to a framework-allocated WDFDEVICE_INIT structure.
-
-Return Value:
-
-    NTSTATUS
-
---*/
 {
     NTSTATUS status;
     WDFDEVICE device;
     WDF_OBJECT_ATTRIBUTES deviceAttributes;
-    WDF_IO_QUEUE_CONFIG queueConfig;
     WDFQUEUE queue;
-
-    UNREFERENCED_PARAMETER(Driver);
+    WDF_IO_QUEUE_CONFIG queueConfig;
 
     PAGED_CODE();
+    UNREFERENCED_PARAMETER(Driver);
 
-    //
-    // Set up device context.
-    //
     WDF_OBJECT_ATTRIBUTES_INIT_CONTEXT_TYPE(&deviceAttributes, DEVICE_CONTEXT);
 
     status = WdfDeviceCreate(&DeviceInit, &deviceAttributes, &device);
@@ -130,608 +103,53 @@ Return Value:
     }
 
     //
-    // Initialize device context.
+    // Create a default parallel queue for IOCTLs.
     //
-    PDEVICE_CONTEXT ctx = DeviceGetContext(device);
-    ctx->Device = device;
-    ctx->OperationCount = 0;
+    WDF_IO_QUEUE_CONFIG_INIT_DEFAULT_QUEUE(&queueConfig, WdfIoQueueDispatchParallel);
+    queueConfig.EvtIoDeviceControl = EvtIoDeviceControl;
+
+    status = WdfIoQueueCreate(device, &queueConfig, WDF_NO_OBJECT_ATTRIBUTES, &queue);
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
 
     //
-    // Create a device interface so user-mode apps can open this device.
+    // Create a device interface so user-mode apps can open the device.
     //
     status = WdfDeviceCreateDeviceInterface(
         device,
         &GUID_DEVINTERFACE_UMA_SAMPLE,
         NULL
         );
-    if (!NT_SUCCESS(status)) {
-        return status;
-    }
 
-    //
-    // Create default I/O queue for device control requests.
-    //
-    WDF_IO_QUEUE_CONFIG_INIT_DEFAULT_QUEUE(&queueConfig, WdfIoQueueDispatchParallel);
-    queueConfig.EvtIoDeviceControl = EvtIoDeviceControl;
-
-    status = WdfIoQueueCreate(device, &queueConfig, WDF_NO_OBJECT_ATTRIBUTES, &queue);
     return status;
 }
 
-
-//
-// Helper: Handle IOCTL_UMA_READ_VALUES
-//
-// Demonstrates: ReadUCharFromUser, ReadUShortFromUser, ReadULongFromUser,
-//               ReadULong64FromUser, ReadBooleanFromUser, ReadHandleFromUser,
-//               ReadULongFromUserAcquire, ReadNtStatusFromUser
-//
+// -----------------------------------------------------------------------
+// Helper: extract METHOD_NEITHER buffer pointers from IRP
+// -----------------------------------------------------------------------
 static
-NTSTATUS
-HandleReadValues(
+VOID
+GetNeitherBuffers(
     _In_ WDFREQUEST Request,
-    _In_ PVOID InputBuffer,
-    _In_ size_t InputBufferLength,
-    _In_ PVOID OutputBuffer,
-    _In_ size_t OutputBufferLength
+    _Out_ PVOID *InputBuffer,
+    _Out_ ULONG *InputLength,
+    _Out_ PVOID *OutputBuffer,
+    _Out_ ULONG *OutputLength
     )
 {
-    NTSTATUS status;
-    PUMA_READ_VALUES_INPUT userInput;
-    UMA_READ_VALUES_OUTPUT output = {0};
+    PIRP irp = WdfRequestWdmGetIrp(Request);
+    PIO_STACK_LOCATION irpSp = IoGetCurrentIrpStackLocation(irp);
 
-    UNREFERENCED_PARAMETER(Request);
-
-    if (InputBufferLength < sizeof(UMA_READ_VALUES_INPUT) ||
-        OutputBufferLength < sizeof(UMA_READ_VALUES_OUTPUT)) {
-        return STATUS_BUFFER_TOO_SMALL;
-    }
-
-    userInput = (PUMA_READ_VALUES_INPUT)InputBuffer;
-
-    //
-    // Read individual typed values safely from user-mode memory.
-    // Each function validates the pointer and uses SEH internally.
-    //
-
-    // ReadUCharFromUser: safely read a UCHAR
-    status = ReadUCharFromUser(&userInput->UCharValue, &output.UCharValue);
-    if (!NT_SUCCESS(status)) {
-        output.StatusResult = status;
-        goto WriteOutput;
-    }
-
-    // ReadUShortFromUser: safely read a USHORT
-    status = ReadUShortFromUser(&userInput->UShortValue, &output.UShortValue);
-    if (!NT_SUCCESS(status)) {
-        output.StatusResult = status;
-        goto WriteOutput;
-    }
-
-    // ReadULongFromUser: safely read a ULONG
-    status = ReadULongFromUser(&userInput->ULongValue, &output.ULongValue);
-    if (!NT_SUCCESS(status)) {
-        output.StatusResult = status;
-        goto WriteOutput;
-    }
-
-    // ReadULong64FromUser: safely read a ULONG64
-    status = ReadULong64FromUser(&userInput->ULong64Value, &output.ULong64Value);
-    if (!NT_SUCCESS(status)) {
-        output.StatusResult = status;
-        goto WriteOutput;
-    }
-
-    // ReadBooleanFromUser: safely read a BOOLEAN
-    status = ReadBooleanFromUser(&userInput->BoolValue, &output.BoolValue);
-    if (!NT_SUCCESS(status)) {
-        output.StatusResult = status;
-        goto WriteOutput;
-    }
-
-    output.StatusResult = STATUS_SUCCESS;
-
-WriteOutput:
-    //
-    // WriteStructToUser: safely write the entire output struct to user memory.
-    //
-    status = WriteStructToUser((PUMA_READ_VALUES_OUTPUT)OutputBuffer, &output);
-    return status;
+    *InputBuffer  = irpSp->Parameters.DeviceIoControl.Type3InputBuffer;
+    *InputLength  = irpSp->Parameters.DeviceIoControl.InputBufferLength;
+    *OutputBuffer = irp->UserBuffer;
+    *OutputLength = irpSp->Parameters.DeviceIoControl.OutputBufferLength;
 }
 
-
-//
-// Helper: Handle IOCTL_UMA_WRITE_VALUES
-//
-// Demonstrates: WriteUCharToUser, WriteUShortToUser, WriteULongToUser,
-//               WriteULong64ToUser, WriteBooleanToUser,
-//               WriteULongToUserRelease
-//
-static
-NTSTATUS
-HandleWriteValues(
-    _In_ WDFREQUEST Request,
-    _In_ PVOID InputBuffer,
-    _In_ size_t InputBufferLength,
-    _In_ PVOID OutputBuffer,
-    _In_ size_t OutputBufferLength
-    )
-{
-    NTSTATUS status;
-    UMA_WRITE_VALUES_INPUT input;
-    PUMA_WRITE_VALUES_INPUT userOutput;
-
-    UNREFERENCED_PARAMETER(Request);
-
-    if (InputBufferLength < sizeof(UMA_WRITE_VALUES_INPUT) ||
-        OutputBufferLength < sizeof(UMA_WRITE_VALUES_INPUT)) {
-        return STATUS_BUFFER_TOO_SMALL;
-    }
-
-    //
-    // ReadStructFromUser: safely read the entire input struct from user memory.
-    //
-    status = ReadStructFromUser((PUMA_WRITE_VALUES_INPUT)InputBuffer, &input);
-    if (!NT_SUCCESS(status)) {
-        return status;
-    }
-
-    userOutput = (PUMA_WRITE_VALUES_INPUT)OutputBuffer;
-
-    //
-    // Write individual typed values safely to user-mode memory.
-    //
-
-    // WriteUCharToUser: safely write a UCHAR
-    status = WriteUCharToUser(&userOutput->UCharValue, input.UCharValue);
-    if (!NT_SUCCESS(status)) {
-        return status;
-    }
-
-    // WriteUShortToUser: safely write a USHORT
-    status = WriteUShortToUser(&userOutput->UShortValue, input.UShortValue);
-    if (!NT_SUCCESS(status)) {
-        return status;
-    }
-
-    // WriteULongToUser: safely write a ULONG
-    status = WriteULongToUser(&userOutput->ULongValue, input.ULongValue);
-    if (!NT_SUCCESS(status)) {
-        return status;
-    }
-
-    // WriteULong64ToUser: safely write a ULONG64
-    status = WriteULong64ToUser(&userOutput->ULong64Value, input.ULong64Value);
-    if (!NT_SUCCESS(status)) {
-        return status;
-    }
-
-    // WriteBooleanToUserRelease: safely write a BOOLEAN with release semantics
-    status = WriteBooleanToUserRelease(&userOutput->BoolValue, input.BoolValue);
-    return status;
-}
-
-
-//
-// Helper: Handle IOCTL_UMA_COPY_BUFFER
-//
-// Demonstrates: CopyFromUser, CopyToUser, CopyFromUserNonTemporal,
-//               CopyToUserNonTemporal, CopyFromUserAligned
-//
-static
-NTSTATUS
-HandleCopyBuffer(
-    _In_ WDFREQUEST Request,
-    _In_ PVOID InputBuffer,
-    _In_ size_t InputBufferLength,
-    _In_ PVOID OutputBuffer,
-    _In_ size_t OutputBufferLength
-    )
-{
-    NTSTATUS status;
-    PVOID kernelBuffer;
-    size_t copyLength;
-
-    UNREFERENCED_PARAMETER(Request);
-
-    if (InputBufferLength == 0 || OutputBufferLength == 0) {
-        return STATUS_BUFFER_TOO_SMALL;
-    }
-
-    copyLength = min(InputBufferLength, OutputBufferLength);
-
-    //
-    // Allocate a kernel-mode intermediate buffer.
-    //
-    kernelBuffer = ExAllocatePool2(POOL_FLAG_NON_PAGED, copyLength, UMA_POOL_TAG);
-    if (kernelBuffer == NULL) {
-        return STATUS_INSUFFICIENT_RESOURCES;
-    }
-
-    //
-    // CopyFromUser: safely copy data from user-mode input to kernel buffer.
-    //
-    status = CopyFromUser(kernelBuffer, InputBuffer, copyLength);
-    if (!NT_SUCCESS(status)) {
-        ExFreePoolWithTag(kernelBuffer, UMA_POOL_TAG);
-        return status;
-    }
-
-    //
-    // CopyToUser: safely copy data from kernel buffer to user-mode output.
-    //
-    status = CopyToUser(OutputBuffer, kernelBuffer, copyLength);
-
-    ExFreePoolWithTag(kernelBuffer, UMA_POOL_TAG);
-    return status;
-}
-
-
-//
-// Helper: Handle IOCTL_UMA_FILL_BUFFER
-//
-// Demonstrates: FillUserMemory, SetUserMemory, FillModeMemory
-//
-static
-NTSTATUS
-HandleFillBuffer(
-    _In_ WDFREQUEST Request,
-    _In_ PVOID InputBuffer,
-    _In_ size_t InputBufferLength,
-    _In_ PVOID OutputBuffer,
-    _In_ size_t OutputBufferLength
-    )
-{
-    NTSTATUS status;
-    UMA_FILL_INPUT fillInput;
-
-    UNREFERENCED_PARAMETER(Request);
-
-    if (InputBufferLength < sizeof(UMA_FILL_INPUT)) {
-        return STATUS_BUFFER_TOO_SMALL;
-    }
-
-    //
-    // ReadStructFromUser: read the fill parameters from user memory.
-    //
-    status = ReadStructFromUser((PUMA_FILL_INPUT)InputBuffer, &fillInput);
-    if (!NT_SUCCESS(status)) {
-        return status;
-    }
-
-    if (fillInput.Length == 0 || fillInput.Length > OutputBufferLength) {
-        return STATUS_INVALID_PARAMETER;
-    }
-
-    //
-    // FillUserMemory: fill user-mode output buffer with the specified byte value.
-    //
-    status = FillUserMemory(OutputBuffer, fillInput.Length, fillInput.FillValue);
-    return status;
-}
-
-
-//
-// Helper: Handle IOCTL_UMA_INTERLOCKED_OPS
-//
-// Demonstrates: InterlockedAndToUser, InterlockedOrToUser,
-//               InterlockedCompareExchangeToUser,
-//               InterlockedAnd64ToUser, InterlockedOr64ToUser,
-//               InterlockedCompareExchange64ToUser
-//
-static
-NTSTATUS
-HandleInterlockedOps(
-    _In_ WDFREQUEST Request,
-    _In_ PVOID InputBuffer,
-    _In_ size_t InputBufferLength,
-    _In_ PVOID OutputBuffer,
-    _In_ size_t OutputBufferLength
-    )
-{
-    NTSTATUS status;
-    UMA_INTERLOCKED_INPUT input;
-    UMA_INTERLOCKED_OUTPUT output = {0};
-    LONG tempValue32;
-    LONG64 tempValue64;
-
-    UNREFERENCED_PARAMETER(Request);
-
-    if (InputBufferLength < sizeof(UMA_INTERLOCKED_INPUT) ||
-        OutputBufferLength < sizeof(UMA_INTERLOCKED_OUTPUT)) {
-        return STATUS_BUFFER_TOO_SMALL;
-    }
-
-    //
-    // CopyFromUser: read the interlocked input parameters.
-    //
-    status = CopyFromUser(&input, InputBuffer, sizeof(UMA_INTERLOCKED_INPUT));
-    if (!NT_SUCCESS(status)) {
-        return status;
-    }
-
-    //
-    // 32-bit interlocked operations on user-mode memory.
-    // We operate on a kernel copy to demonstrate the API pattern.
-    //
-
-    // InterlockedAndToUser: atomic AND on a 32-bit user-mode value
-    tempValue32 = input.Value32;
-    status = InterlockedAndToUser(&tempValue32, input.Operand32);
-    if (!NT_SUCCESS(status)) {
-        return status;
-    }
-    output.AndResult32 = tempValue32;
-
-    // InterlockedOrToUser: atomic OR on a 32-bit user-mode value
-    tempValue32 = input.Value32;
-    status = InterlockedOrToUser(&tempValue32, input.Operand32);
-    if (!NT_SUCCESS(status)) {
-        return status;
-    }
-    output.OrResult32 = tempValue32;
-
-    // InterlockedCompareExchangeToUser: atomic CAS on a 32-bit user-mode value
-    tempValue32 = input.Value32;
-    status = InterlockedCompareExchangeToUser(
-        &tempValue32,
-        input.Operand32,   // Exchange value
-        input.Value32      // Comparand (expect match, so exchange happens)
-        );
-    if (!NT_SUCCESS(status)) {
-        return status;
-    }
-    output.CmpXchgResult32 = tempValue32;
-
-    //
-    // 64-bit interlocked operations.
-    //
-
-    // InterlockedAnd64ToUser: atomic AND on a 64-bit user-mode value
-    tempValue64 = input.Value64;
-    status = InterlockedAnd64ToUser(&tempValue64, input.Operand64);
-    if (!NT_SUCCESS(status)) {
-        return status;
-    }
-    output.AndResult64 = tempValue64;
-
-    // InterlockedOr64ToUser: atomic OR on a 64-bit user-mode value
-    tempValue64 = input.Value64;
-    status = InterlockedOr64ToUser(&tempValue64, input.Operand64);
-    if (!NT_SUCCESS(status)) {
-        return status;
-    }
-    output.OrResult64 = tempValue64;
-
-    // InterlockedCompareExchange64ToUser: atomic CAS on a 64-bit user-mode value
-    tempValue64 = input.Value64;
-    status = InterlockedCompareExchange64ToUser(
-        &tempValue64,
-        input.Operand64,
-        input.Value64
-        );
-    if (!NT_SUCCESS(status)) {
-        return status;
-    }
-    output.CmpXchgResult64 = tempValue64;
-
-    //
-    // CopyToUser: write results to user-mode output buffer.
-    //
-    status = CopyToUser(OutputBuffer, &output, sizeof(UMA_INTERLOCKED_OUTPUT));
-    return status;
-}
-
-
-//
-// Helper: Handle IOCTL_UMA_STRING_LENGTH
-//
-// Demonstrates: StringLengthFromUser, WideStringLengthFromUser
-//
-static
-NTSTATUS
-HandleStringLength(
-    _In_ WDFREQUEST Request,
-    _In_ PVOID InputBuffer,
-    _In_ size_t InputBufferLength,
-    _In_ PVOID OutputBuffer,
-    _In_ size_t OutputBufferLength
-    )
-{
-    NTSTATUS status;
-    UMA_STRING_LENGTH_OUTPUT output = {0};
-    SIZE_T ansiLen = 0;
-    SIZE_T wideLen = 0;
-
-    UNREFERENCED_PARAMETER(Request);
-
-    if (InputBufferLength == 0 ||
-        OutputBufferLength < sizeof(UMA_STRING_LENGTH_OUTPUT)) {
-        return STATUS_BUFFER_TOO_SMALL;
-    }
-
-    //
-    // StringLengthFromUser: safely compute the length of a null-terminated
-    // ANSI string in user-mode memory.
-    //
-    status = StringLengthFromUser(
-        (PCSTR)InputBuffer,
-        InputBufferLength,
-        &ansiLen
-        );
-    if (NT_SUCCESS(status)) {
-        output.AnsiLength = ansiLen;
-    }
-
-    //
-    // WideStringLengthFromUser: safely compute the length of a null-terminated
-    // wide string in user-mode memory.
-    //
-    status = WideStringLengthFromUser(
-        (PCWSTR)InputBuffer,
-        InputBufferLength / sizeof(WCHAR),
-        &wideLen
-        );
-    if (NT_SUCCESS(status)) {
-        output.WideLength = wideLen;
-    }
-
-    //
-    // WriteStructToUser: safely write the output structure.
-    //
-    status = WriteStructToUser((PUMA_STRING_LENGTH_OUTPUT)OutputBuffer, &output);
-    return status;
-}
-
-
-//
-// Helper: Handle IOCTL_UMA_STRUCT_ACCESS
-//
-// Demonstrates: ReadStructFromUser, ReadStructFromUserAligned,
-//               WriteStructToUser, WriteStructToUserAligned,
-//               ReadUnicodeStringFromUser (via reading Name field)
-//
-static
-NTSTATUS
-HandleStructAccess(
-    _In_ WDFREQUEST Request,
-    _In_ PVOID InputBuffer,
-    _In_ size_t InputBufferLength,
-    _In_ PVOID OutputBuffer,
-    _In_ size_t OutputBufferLength
-    )
-{
-    NTSTATUS status;
-    UMA_SAMPLE_STRUCT sampleStruct;
-
-    UNREFERENCED_PARAMETER(Request);
-
-    if (InputBufferLength < sizeof(UMA_SAMPLE_STRUCT) ||
-        OutputBufferLength < sizeof(UMA_SAMPLE_STRUCT)) {
-        return STATUS_BUFFER_TOO_SMALL;
-    }
-
-    //
-    // ReadStructFromUser: safely read the entire structure from user memory.
-    //
-    status = ReadStructFromUser(
-        (PUMA_SAMPLE_STRUCT)InputBuffer,
-        &sampleStruct
-        );
-    if (!NT_SUCCESS(status)) {
-        return status;
-    }
-
-    //
-    // Modify the struct in kernel space: increment Id, toggle Active.
-    //
-    sampleStruct.Id += 1;
-    sampleStruct.Active = !sampleStruct.Active;
-
-    //
-    // ReadULongFromUser: demonstrate reading a single field from user struct.
-    //
-    ULONG originalId;
-    status = ReadULongFromUser(
-        &((PUMA_SAMPLE_STRUCT)InputBuffer)->Id,
-        &originalId
-        );
-    if (!NT_SUCCESS(status)) {
-        return status;
-    }
-
-    //
-    // WriteStructToUser: safely write the modified struct back to user memory.
-    //
-    status = WriteStructToUser(
-        (PUMA_SAMPLE_STRUCT)OutputBuffer,
-        &sampleStruct
-        );
-    return status;
-}
-
-
-//
-// Helper: Handle IOCTL_UMA_MODE_OPERATIONS
-//
-// Demonstrates: ReadULongFromMode, WriteULongToMode, CopyFromMode,
-//               CopyToMode, FillModeMemory, SetModeMemory,
-//               StringLengthFromMode, CopyFromModeAligned,
-//               CopyToModeNonTemporal, CopyFromModeNonTemporal
-//
-static
-NTSTATUS
-HandleModeOperations(
-    _In_ WDFREQUEST Request,
-    _In_ PVOID InputBuffer,
-    _In_ size_t InputBufferLength,
-    _In_ PVOID OutputBuffer,
-    _In_ size_t OutputBufferLength
-    )
-{
-    NTSTATUS status;
-    UMA_MODE_INPUT modeInput;
-    ULONG readValue;
-    ULONG resultValue;
-
-    UNREFERENCED_PARAMETER(Request);
-
-    if (InputBufferLength < sizeof(UMA_MODE_INPUT) ||
-        OutputBufferLength < sizeof(ULONG)) {
-        return STATUS_BUFFER_TOO_SMALL;
-    }
-
-    //
-    // CopyFromUser: read mode input parameters.
-    //
-    status = CopyFromUser(&modeInput, InputBuffer, sizeof(UMA_MODE_INPUT));
-    if (!NT_SUCCESS(status)) {
-        return status;
-    }
-
-    //
-    // ReadULongFromMode: safely read a ULONG based on processor mode.
-    // When mode is UserMode, validates the pointer is in user address range.
-    // When mode is KernelMode, accesses directly.
-    //
-    status = ReadULongFromMode(
-        &((PUMA_MODE_INPUT)InputBuffer)->Value,
-        modeInput.Mode,
-        &readValue
-        );
-    if (!NT_SUCCESS(status)) {
-        return status;
-    }
-
-    //
-    // Demonstrate CopyFromMode: copy with mode-dependent validation.
-    //
-    ULONG modeCopyBuffer;
-    status = CopyFromMode(
-        &modeCopyBuffer,
-        &((PUMA_MODE_INPUT)InputBuffer)->Value,
-        sizeof(ULONG),
-        modeInput.Mode
-        );
-    if (!NT_SUCCESS(status)) {
-        return status;
-    }
-
-    resultValue = readValue + modeCopyBuffer;
-
-    //
-    // WriteULongToMode: safely write result based on processor mode.
-    //
-    status = WriteULongToMode(
-        (PULONG)OutputBuffer,
-        modeInput.Mode,
-        resultValue
-        );
-
-    return status;
-}
-
-
+// -----------------------------------------------------------------------
+// EvtIoDeviceControl - dispatch IOCTLs to handlers
+// -----------------------------------------------------------------------
 VOID
 EvtIoDeviceControl(
     _In_ WDFQUEUE   Queue,
@@ -740,141 +158,593 @@ EvtIoDeviceControl(
     _In_ size_t     InputBufferLength,
     _In_ ULONG      IoControlCode
     )
-/*++
-
-Routine Description:
-
-    Handles device I/O control requests. Each IOCTL exercises a different
-    set of usermode_accessors.h DDI functions.
-
-Arguments:
-
-    Queue             - Handle to the I/O queue.
-    Request           - Handle to the request.
-    OutputBufferLength - Length of the output buffer.
-    InputBufferLength  - Length of the input buffer.
-    IoControlCode     - The IOCTL code.
-
---*/
 {
     NTSTATUS status;
-    PVOID inputBuffer = NULL;
-    PVOID outputBuffer = NULL;
-    size_t bytesReturned = 0;
-    WDFDEVICE device;
-    PDEVICE_CONTEXT ctx;
-    PIO_STACK_LOCATION irpStack;
-    PIRP irp;
+    ULONG_PTR bytesReturned = 0;
+    PDEVICE_CONTEXT devCtx;
 
     PAGED_CODE();
+    UNREFERENCED_PARAMETER(OutputBufferLength);
+    UNREFERENCED_PARAMETER(InputBufferLength);
 
-    device = WdfIoQueueGetDevice(Queue);
-    ctx = DeviceGetContext(device);
+    devCtx = DeviceGetContext(WdfIoQueueGetDevice(Queue));
+    devCtx->OperationCount++;
 
-    //
-    // For METHOD_NEITHER IOCTLs, retrieve buffers from the IRP directly.
-    //
-    irp = WdfRequestWdmGetIrp(Request);
-    irpStack = IoGetCurrentIrpStackLocation(irp);
+    switch (IoControlCode) {
 
-    inputBuffer = irpStack->Parameters.DeviceIoControl.Type3InputBuffer;
-    outputBuffer = irp->UserBuffer;
-
-    //
-    // Use UmaExceptionFilter in the __except block for mode-appropriate
-    // exception handling when accessing user-mode memory.
-    //
-    __try {
-
-        switch (IoControlCode) {
-
-        case IOCTL_UMA_READ_VALUES:
-            status = HandleReadValues(
-                Request, inputBuffer, InputBufferLength,
-                outputBuffer, OutputBufferLength);
-            if (NT_SUCCESS(status)) {
-                bytesReturned = sizeof(UMA_READ_VALUES_OUTPUT);
-            }
-            break;
-
-        case IOCTL_UMA_WRITE_VALUES:
-            status = HandleWriteValues(
-                Request, inputBuffer, InputBufferLength,
-                outputBuffer, OutputBufferLength);
-            if (NT_SUCCESS(status)) {
-                bytesReturned = sizeof(UMA_WRITE_VALUES_INPUT);
-            }
-            break;
-
-        case IOCTL_UMA_COPY_BUFFER:
-            status = HandleCopyBuffer(
-                Request, inputBuffer, InputBufferLength,
-                outputBuffer, OutputBufferLength);
-            if (NT_SUCCESS(status)) {
-                bytesReturned = min(InputBufferLength, OutputBufferLength);
-            }
-            break;
-
-        case IOCTL_UMA_FILL_BUFFER:
-            status = HandleFillBuffer(
-                Request, inputBuffer, InputBufferLength,
-                outputBuffer, OutputBufferLength);
-            if (NT_SUCCESS(status)) {
-                bytesReturned = OutputBufferLength;
-            }
-            break;
-
-        case IOCTL_UMA_INTERLOCKED_OPS:
-            status = HandleInterlockedOps(
-                Request, inputBuffer, InputBufferLength,
-                outputBuffer, OutputBufferLength);
-            if (NT_SUCCESS(status)) {
-                bytesReturned = sizeof(UMA_INTERLOCKED_OUTPUT);
-            }
-            break;
-
-        case IOCTL_UMA_STRING_LENGTH:
-            status = HandleStringLength(
-                Request, inputBuffer, InputBufferLength,
-                outputBuffer, OutputBufferLength);
-            if (NT_SUCCESS(status)) {
-                bytesReturned = sizeof(UMA_STRING_LENGTH_OUTPUT);
-            }
-            break;
-
-        case IOCTL_UMA_STRUCT_ACCESS:
-            status = HandleStructAccess(
-                Request, inputBuffer, InputBufferLength,
-                outputBuffer, OutputBufferLength);
-            if (NT_SUCCESS(status)) {
-                bytesReturned = sizeof(UMA_SAMPLE_STRUCT);
-            }
-            break;
-
-        case IOCTL_UMA_MODE_OPERATIONS:
-            status = HandleModeOperations(
-                Request, inputBuffer, InputBufferLength,
-                outputBuffer, OutputBufferLength);
-            if (NT_SUCCESS(status)) {
-                bytesReturned = sizeof(ULONG);
-            }
-            break;
-
-        default:
-            status = STATUS_INVALID_DEVICE_REQUEST;
-            break;
+    case IOCTL_UMA_READ_VALUES:
+        status = HandleReadValues(Request);
+        if (NT_SUCCESS(status)) {
+            bytesReturned = sizeof(UMA_READ_VALUES_OUTPUT);
         }
+        break;
 
-    } __except (UmaExceptionFilter(GetExceptionInformation(), UserMode)) {
+    case IOCTL_UMA_WRITE_VALUES:
+        status = HandleWriteValues(Request);
+        if (NT_SUCCESS(status)) {
+            bytesReturned = sizeof(UMA_WRITE_VALUES_INPUT);
+        }
+        break;
+
+    case IOCTL_UMA_COPY_BUFFER:
+        status = HandleCopyBuffer(Request);
+        if (NT_SUCCESS(status)) {
+            bytesReturned = (ULONG_PTR)OutputBufferLength;
+        }
+        break;
+
+    case IOCTL_UMA_FILL_BUFFER:
+        status = HandleFillBuffer(Request);
+        if (NT_SUCCESS(status)) {
+            bytesReturned = (ULONG_PTR)OutputBufferLength;
+        }
+        break;
+
+    case IOCTL_UMA_INTERLOCKED_OPS:
+        status = HandleInterlockedOps(Request);
+        if (NT_SUCCESS(status)) {
+            bytesReturned = sizeof(UMA_INTERLOCKED_OUTPUT);
+        }
+        break;
+
+    case IOCTL_UMA_STRING_LENGTH:
+        status = HandleStringLength(Request);
+        if (NT_SUCCESS(status)) {
+            bytesReturned = sizeof(UMA_STRING_LENGTH_OUTPUT);
+        }
+        break;
+
+    case IOCTL_UMA_STRUCT_ACCESS:
+        status = HandleStructAccess(Request);
+        if (NT_SUCCESS(status)) {
+            bytesReturned = sizeof(UMA_SAMPLE_STRUCT);
+        }
+        break;
+
+    case IOCTL_UMA_MODE_OPERATIONS:
+        status = HandleModeOperations(Request);
+        if (NT_SUCCESS(status)) {
+            bytesReturned = sizeof(ULONG);
+        }
+        break;
+
+    default:
+        status = STATUS_INVALID_DEVICE_REQUEST;
+        break;
+    }
+
+    WdfRequestCompleteWithInformation(Request, status, bytesReturned);
+}
+
+// -----------------------------------------------------------------------
+// IOCTL_UMA_READ_VALUES
+//
+// Demonstrates: ReadUCharFromUser, ReadUShortFromUser, ReadULongFromUser,
+//   ReadULong64FromUser, ReadBooleanFromUser
+//   WriteUCharToUser, WriteUShortToUser, WriteULongToUser,
+//   WriteULong64ToUser, WriteBooleanToUserRelease
+//
+// ReadXxxFromUser(ptr) -> returns value directly. Single parameter.
+// WriteXxxToUser(ptr, value) -> void. Two parameters.
+// -----------------------------------------------------------------------
+static
+NTSTATUS
+HandleReadValues(
+    _In_ WDFREQUEST Request
+    )
+{
+    NTSTATUS status = STATUS_SUCCESS;
+    PVOID inputBuffer;
+    ULONG inputLength;
+    PVOID outputBuffer;
+    ULONG outputLength;
+    PUMA_READ_VALUES_INPUT userInput;
+    PUMA_READ_VALUES_OUTPUT userOutput;
+    UCHAR ucharVal;
+    USHORT ushortVal;
+    ULONG ulongVal;
+    ULONG64 ulong64Val;
+    BOOLEAN boolVal;
+
+    GetNeitherBuffers(Request, &inputBuffer, &inputLength, &outputBuffer, &outputLength);
+
+    if (inputLength < sizeof(UMA_READ_VALUES_INPUT) ||
+        outputLength < sizeof(UMA_READ_VALUES_OUTPUT)) {
+        return STATUS_BUFFER_TOO_SMALL;
+    }
+
+    userInput = (PUMA_READ_VALUES_INPUT)inputBuffer;
+    userOutput = (PUMA_READ_VALUES_OUTPUT)outputBuffer;
+
+    __try {
         //
-        // UmaExceptionFilter: provides mode-dependent exception filtering.
-        // For UserMode access, it returns EXCEPTION_EXECUTE_HANDLER for
-        // access violations, letting us return a clean error status.
+        // ReadXxxFromUser: takes a single pointer to user-mode memory,
+        // returns the value at that location. Raises SEH on invalid access.
         //
+        ucharVal   = ReadUCharFromUser(&userInput->UCharValue);
+        ushortVal  = ReadUShortFromUser(&userInput->UShortValue);
+        ulongVal   = ReadULongFromUser(&userInput->ULongValue);
+        ulong64Val = ReadULong64FromUser(&userInput->ULong64Value);
+        boolVal    = ReadBooleanFromUser(&userInput->BoolValue);
+
+        //
+        // WriteXxxToUser: takes a destination pointer and a value,
+        // writes the value to user-mode memory. Void return.
+        //
+        WriteUCharToUser(&userOutput->UCharValue, ucharVal);
+        WriteUShortToUser(&userOutput->UShortValue, ushortVal);
+        WriteULongToUser(&userOutput->ULongValue, ulongVal);
+        WriteULong64ToUser(&userOutput->ULong64Value, ulong64Val);
+        WriteBooleanToUserRelease(&userOutput->BoolValue, boolVal);
+        WriteULongToUser((volatile ULONG *)&userOutput->StatusResult, (ULONG)STATUS_SUCCESS);
+
+    } __except (UmaExceptionFilter(UserMode)) {
         status = GetExceptionCode();
     }
 
-    ctx->OperationCount++;
+    return status;
+}
 
-    WdfRequestCompleteWithInformation(Request, status, bytesReturned);
+// -----------------------------------------------------------------------
+// IOCTL_UMA_WRITE_VALUES
+//
+// Demonstrates: WriteUCharToUser, WriteUShortToUser, WriteULongToUser,
+//   WriteULong64ToUser, WriteBooleanToUserRelease
+//
+// WriteXxxToUser(destPtr, value) -> void. Raises SEH on failure.
+// -----------------------------------------------------------------------
+static
+NTSTATUS
+HandleWriteValues(
+    _In_ WDFREQUEST Request
+    )
+{
+    NTSTATUS status = STATUS_SUCCESS;
+    PVOID inputBuffer;
+    ULONG inputLength;
+    PVOID outputBuffer;
+    ULONG outputLength;
+    PUMA_WRITE_VALUES_INPUT userInput;
+    PUMA_WRITE_VALUES_INPUT userOutput;
+    UCHAR ucharVal;
+    USHORT ushortVal;
+    ULONG ulongVal;
+    ULONG64 ulong64Val;
+    BOOLEAN boolVal;
+
+    GetNeitherBuffers(Request, &inputBuffer, &inputLength, &outputBuffer, &outputLength);
+
+    if (inputLength < sizeof(UMA_WRITE_VALUES_INPUT) ||
+        outputLength < sizeof(UMA_WRITE_VALUES_INPUT)) {
+        return STATUS_BUFFER_TOO_SMALL;
+    }
+
+    userInput = (PUMA_WRITE_VALUES_INPUT)inputBuffer;
+    userOutput = (PUMA_WRITE_VALUES_INPUT)outputBuffer;
+
+    __try {
+        //
+        // Read values from user input buffer.
+        //
+        ucharVal   = ReadUCharFromUser(&userInput->UCharValue);
+        ushortVal  = ReadUShortFromUser(&userInput->UShortValue);
+        ulongVal   = ReadULongFromUser(&userInput->ULongValue);
+        ulong64Val = ReadULong64FromUser(&userInput->ULong64Value);
+        boolVal    = ReadBooleanFromUser(&userInput->BoolValue);
+
+        //
+        // Write each value to the output buffer using WriteXxxToUser.
+        //
+        WriteUCharToUser(&userOutput->UCharValue, ucharVal);
+        WriteUShortToUser(&userOutput->UShortValue, ushortVal);
+        WriteULongToUser(&userOutput->ULongValue, ulongVal);
+        WriteULong64ToUser(&userOutput->ULong64Value, ulong64Val);
+        WriteBooleanToUserRelease(&userOutput->BoolValue, boolVal);
+
+    } __except (UmaExceptionFilter(UserMode)) {
+        status = GetExceptionCode();
+    }
+
+    return status;
+}
+
+// -----------------------------------------------------------------------
+// IOCTL_UMA_COPY_BUFFER
+//
+// Demonstrates: CopyFromUser, CopyToUser
+//
+// CopyFromUser(kernelDest, userSrc, length) -> void
+// CopyToUser(userDest, kernelSrc, length)   -> void
+// -----------------------------------------------------------------------
+static
+NTSTATUS
+HandleCopyBuffer(
+    _In_ WDFREQUEST Request
+    )
+{
+    NTSTATUS status = STATUS_SUCCESS;
+    PVOID inputBuffer;
+    ULONG inputLength;
+    PVOID outputBuffer;
+    ULONG outputLength;
+    PVOID kernelBuffer = NULL;
+    SIZE_T copyLength;
+
+    GetNeitherBuffers(Request, &inputBuffer, &inputLength, &outputBuffer, &outputLength);
+
+    copyLength = min(inputLength, outputLength);
+    if (copyLength == 0) {
+        return STATUS_BUFFER_TOO_SMALL;
+    }
+
+    //
+    // Allocate a kernel-mode intermediate buffer to demonstrate
+    // the copy-from-user then copy-to-user pattern.
+    //
+    kernelBuffer = ExAllocatePool2(POOL_FLAG_PAGED, copyLength, UMA_POOL_TAG);
+    if (kernelBuffer == NULL) {
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    __try {
+        //
+        // CopyFromUser: copy from user-mode source into kernel buffer.
+        // Signature: VOID CopyFromUser(volatile VOID* Dest, volatile const VOID* Src, SIZE_T Len)
+        //
+        CopyFromUser(kernelBuffer, inputBuffer, copyLength);
+
+        //
+        // CopyToUser: copy from kernel buffer to user-mode destination.
+        // Signature: VOID CopyToUser(volatile VOID* Dest, const VOID* Src, SIZE_T Len)
+        //
+        CopyToUser(outputBuffer, kernelBuffer, copyLength);
+
+    } __except (UmaExceptionFilter(UserMode)) {
+        status = GetExceptionCode();
+    }
+
+    ExFreePoolWithTag(kernelBuffer, UMA_POOL_TAG);
+    return status;
+}
+
+// -----------------------------------------------------------------------
+// IOCTL_UMA_FILL_BUFFER
+//
+// Demonstrates: FillUserMemory
+//
+// FillUserMemory(dest, length, fillByte) -> void
+// -----------------------------------------------------------------------
+static
+NTSTATUS
+HandleFillBuffer(
+    _In_ WDFREQUEST Request
+    )
+{
+    NTSTATUS status = STATUS_SUCCESS;
+    PVOID inputBuffer;
+    ULONG inputLength;
+    PVOID outputBuffer;
+    ULONG outputLength;
+    UMA_FILL_INPUT localFillInput;
+
+    GetNeitherBuffers(Request, &inputBuffer, &inputLength, &outputBuffer, &outputLength);
+
+    if (inputLength < sizeof(UMA_FILL_INPUT)) {
+        return STATUS_BUFFER_TOO_SMALL;
+    }
+
+    //
+    // First, safely read the fill parameters from user-mode input.
+    //
+    __try {
+        CopyFromUser(&localFillInput, inputBuffer, sizeof(UMA_FILL_INPUT));
+    } __except (UmaExceptionFilter(UserMode)) {
+        return GetExceptionCode();
+    }
+
+    if (localFillInput.Length == 0 || localFillInput.Length > outputLength) {
+        return STATUS_BUFFER_TOO_SMALL;
+    }
+
+    //
+    // Fill the user-mode output buffer with the specified byte value.
+    // Signature: VOID FillUserMemory(volatile VOID* Dest, SIZE_T Length, UCHAR Fill)
+    //
+    __try {
+        FillUserMemory(outputBuffer, localFillInput.Length, localFillInput.FillValue);
+    } __except (UmaExceptionFilter(UserMode)) {
+        status = GetExceptionCode();
+    }
+
+    return status;
+}
+
+// -----------------------------------------------------------------------
+// IOCTL_UMA_INTERLOCKED_OPS
+//
+// Demonstrates: InterlockedAndToUser, InterlockedOrToUser,
+//   InterlockedCompareExchangeToUser, InterlockedAnd64ToUser,
+//   InterlockedOr64ToUser, InterlockedCompareExchange64ToUser
+//
+// These return the original (previous) value as LONG or LONG64.
+// -----------------------------------------------------------------------
+static
+NTSTATUS
+HandleInterlockedOps(
+    _In_ WDFREQUEST Request
+    )
+{
+    NTSTATUS status = STATUS_SUCCESS;
+    PVOID inputBuffer;
+    ULONG inputLength;
+    PVOID outputBuffer;
+    ULONG outputLength;
+    UMA_INTERLOCKED_INPUT localInput;
+    UMA_INTERLOCKED_OUTPUT localOutput;
+    PUMA_INTERLOCKED_INPUT userInput;
+
+    GetNeitherBuffers(Request, &inputBuffer, &inputLength, &outputBuffer, &outputLength);
+
+    if (inputLength < sizeof(UMA_INTERLOCKED_INPUT) ||
+        outputLength < sizeof(UMA_INTERLOCKED_OUTPUT)) {
+        return STATUS_BUFFER_TOO_SMALL;
+    }
+
+    userInput = (PUMA_INTERLOCKED_INPUT)inputBuffer;
+
+    //
+    // Copy input to local kernel memory so we can safely read the operands.
+    //
+    __try {
+        CopyFromUser(&localInput, inputBuffer, sizeof(UMA_INTERLOCKED_INPUT));
+    } __except (UmaExceptionFilter(UserMode)) {
+        return GetExceptionCode();
+    }
+
+    __try {
+        //
+        // 32-bit interlocked operations on user-mode memory.
+        // Each returns the previous value before the operation.
+        //
+        localOutput.AndResult32 = InterlockedAndToUser(
+            &userInput->Value32, localInput.Operand32);
+
+        localOutput.OrResult32 = InterlockedOrToUser(
+            &userInput->Value32, localInput.Operand32);
+
+        localOutput.CmpXchgResult32 = InterlockedCompareExchangeToUser(
+            &userInput->Value32, localInput.Operand32, localInput.Operand32);
+
+        //
+        // 64-bit interlocked operations on user-mode memory.
+        //
+        localOutput.AndResult64 = InterlockedAnd64ToUser(
+            &userInput->Value64, localInput.Operand64);
+
+        localOutput.OrResult64 = InterlockedOr64ToUser(
+            &userInput->Value64, localInput.Operand64);
+
+        localOutput.CmpXchgResult64 = InterlockedCompareExchange64ToUser(
+            &userInput->Value64, localInput.Operand64, localInput.Operand64);
+
+        //
+        // Write results to user-mode output buffer.
+        //
+        CopyToUser(outputBuffer, &localOutput, sizeof(UMA_INTERLOCKED_OUTPUT));
+
+    } __except (UmaExceptionFilter(UserMode)) {
+        status = GetExceptionCode();
+    }
+
+    return status;
+}
+
+// -----------------------------------------------------------------------
+// IOCTL_UMA_STRING_LENGTH
+//
+// Demonstrates: StringLengthFromUser, WideStringLengthFromUser
+//
+// StringLengthFromUser(stringPtr)      -> returns SIZE_T (1 param)
+// WideStringLengthFromUser(stringPtr)  -> returns SIZE_T (1 param)
+// -----------------------------------------------------------------------
+static
+NTSTATUS
+HandleStringLength(
+    _In_ WDFREQUEST Request
+    )
+{
+    NTSTATUS status = STATUS_SUCCESS;
+    PVOID inputBuffer;
+    ULONG inputLength;
+    PVOID outputBuffer;
+    ULONG outputLength;
+    PUMA_STRING_INPUT userInput;
+    UMA_STRING_LENGTH_OUTPUT localOutput;
+    SIZE_T ansiLen;
+    SIZE_T wideLen;
+
+    GetNeitherBuffers(Request, &inputBuffer, &inputLength, &outputBuffer, &outputLength);
+
+    if (inputLength < sizeof(UMA_STRING_INPUT) ||
+        outputLength < sizeof(UMA_STRING_LENGTH_OUTPUT)) {
+        return STATUS_BUFFER_TOO_SMALL;
+    }
+
+    userInput = (PUMA_STRING_INPUT)inputBuffer;
+
+    __try {
+        //
+        // StringLengthFromUser: takes a single pointer to a user-mode
+        // null-terminated ANSI string, returns the length in characters.
+        //
+        ansiLen = StringLengthFromUser(userInput->AnsiString);
+
+        //
+        // WideStringLengthFromUser: same for wide (WCHAR) strings.
+        //
+        wideLen = WideStringLengthFromUser(userInput->WideString);
+
+        localOutput.AnsiLength = ansiLen;
+        localOutput.WideLength = wideLen;
+
+        //
+        // Write the result to user-mode output.
+        //
+        CopyToUser(outputBuffer, &localOutput, sizeof(UMA_STRING_LENGTH_OUTPUT));
+
+    } __except (UmaExceptionFilter(UserMode)) {
+        status = GetExceptionCode();
+    }
+
+    return status;
+}
+
+// -----------------------------------------------------------------------
+// IOCTL_UMA_STRUCT_ACCESS
+//
+// Demonstrates: ReadStructFromUser, WriteStructToUser (macros)
+//
+// These are macros that expand to do { ... } while(0) statements.
+// They CANNOT be used as expressions. Use as standalone statements only.
+//
+// ReadStructFromUser(kernelDest, userSrc)   - copies user struct to kernel
+// WriteStructToUser(userDest, kernelSrc)    - copies kernel struct to user
+// -----------------------------------------------------------------------
+static
+NTSTATUS
+HandleStructAccess(
+    _In_ WDFREQUEST Request
+    )
+{
+    NTSTATUS status = STATUS_SUCCESS;
+    PVOID inputBuffer;
+    ULONG inputLength;
+    PVOID outputBuffer;
+    ULONG outputLength;
+    UMA_SAMPLE_STRUCT localStruct;
+
+    GetNeitherBuffers(Request, &inputBuffer, &inputLength, &outputBuffer, &outputLength);
+
+    if (inputLength < sizeof(UMA_SAMPLE_STRUCT) ||
+        outputLength < sizeof(UMA_SAMPLE_STRUCT)) {
+        return STATUS_BUFFER_TOO_SMALL;
+    }
+
+    __try {
+        //
+        // ReadStructFromUser: macro that copies a user-mode struct to a local copy.
+        // Expands to do { CopyFromUser(dst, src, sizeof(*dst)); } while(0)
+        //
+        ReadStructFromUser(&localStruct, (PUMA_SAMPLE_STRUCT)inputBuffer);
+
+        //
+        // Modify the struct in kernel mode to prove we read and can write back.
+        //
+        localStruct.Id += 1;
+        localStruct.Timestamp += 100;
+
+        //
+        // WriteStructToUser: macro that copies a kernel struct to user-mode memory.
+        // Expands to do { CopyToUser(dst, src, sizeof(*dst)); } while(0)
+        //
+        WriteStructToUser((PUMA_SAMPLE_STRUCT)outputBuffer, &localStruct);
+
+    } __except (UmaExceptionFilter(UserMode)) {
+        status = GetExceptionCode();
+    }
+
+    return status;
+}
+
+// -----------------------------------------------------------------------
+// IOCTL_UMA_MODE_OPERATIONS
+//
+// Demonstrates: ReadULongFromMode, WriteULongToMode, CopyFromMode
+//
+// ReadULongFromMode(srcPtr, Mode)             -> returns ULONG
+// WriteULongToMode(destPtr, value, Mode)      -> void (value before Mode)
+// CopyFromMode(dest, src, length, Mode)       -> void
+// -----------------------------------------------------------------------
+static
+NTSTATUS
+HandleModeOperations(
+    _In_ WDFREQUEST Request
+    )
+{
+    NTSTATUS status = STATUS_SUCCESS;
+    PVOID inputBuffer;
+    ULONG inputLength;
+    PVOID outputBuffer;
+    ULONG outputLength;
+    UMA_MODE_INPUT localModeInput;
+    ULONG readValue;
+
+    GetNeitherBuffers(Request, &inputBuffer, &inputLength, &outputBuffer, &outputLength);
+
+    if (inputLength < sizeof(UMA_MODE_INPUT) ||
+        outputLength < sizeof(ULONG)) {
+        return STATUS_BUFFER_TOO_SMALL;
+    }
+
+    //
+    // Read input using CopyFromMode to demonstrate the mode-aware copy.
+    // CopyFromMode(dest, src, length, Mode) -> void
+    //
+    __try {
+        CopyFromMode(
+            &localModeInput,
+            inputBuffer,
+            sizeof(UMA_MODE_INPUT),
+            UserMode
+            );
+    } __except (UmaExceptionFilter(UserMode)) {
+        return GetExceptionCode();
+    }
+
+    __try {
+        //
+        // ReadULongFromMode: read a ULONG from user-mode memory with explicit mode.
+        // Signature: ULONG ReadULongFromMode(const volatile ULONG* Source, KPROCESSOR_MODE Mode)
+        //
+        readValue = ReadULongFromMode(
+            (const volatile ULONG *)&((PUMA_MODE_INPUT)inputBuffer)->Value,
+            UserMode
+            );
+
+        //
+        // WriteULongToMode: write a ULONG to user-mode memory with explicit mode.
+        // Signature: VOID WriteULongToMode(volatile ULONG* Dest, ULONG Value, KPROCESSOR_MODE Mode)
+        // Note: value parameter comes before mode parameter.
+        //
+        WriteULongToMode(
+            (volatile ULONG *)outputBuffer,
+            readValue,
+            UserMode
+            );
+
+    } __except (UmaExceptionFilter(UserMode)) {
+        status = GetExceptionCode();
+    }
+
+    return status;
 }
