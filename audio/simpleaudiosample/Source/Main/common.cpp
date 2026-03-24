@@ -2511,7 +2511,7 @@ Return Value:
 
         // Allocate the key value name string
         pwstrKeyValueName = (PWSTR)ExAllocatePool2(POOL_FLAG_NON_PAGED, kvFullInfo->NameLength + sizeof(WCHAR)*2, MINADAPTER_POOLTAG);
-        IF_TRUE_ACTION_JUMP(kvFullInfo == NULL, ntStatus = STATUS_INSUFFICIENT_RESOURCES, loop_exit);
+        IF_TRUE_ACTION_JUMP(pwstrKeyValueName == NULL, ntStatus = STATUS_INSUFFICIENT_RESOURCES, loop_exit);
 
         // Copy the key value name from the full information struct
         RtlStringCbCopyNW(pwstrKeyValueName, kvFullInfo->NameLength + sizeof(WCHAR)*2, kvFullInfo->Name, kvFullInfo->NameLength);
@@ -2531,6 +2531,7 @@ Return Value:
         if (pwstrKeyValueName)
         {
             ExFreePoolWithTag(pwstrKeyValueName, MINADAPTER_POOLTAG);
+            pwstrKeyValueName = NULL;
         }
 
         // Bail if anything failed
@@ -2547,6 +2548,7 @@ Exit:
     return ntStatus;
 }
 
+#pragma code_seg("PAGE")
 NTSTATUS
 CopyRegistryKey(HANDLE _hSourceKey, HANDLE _hDestinationKey, BOOL _bOverwrite = FALSE)
 /*++
@@ -2617,7 +2619,7 @@ Return Value:
 
         // Allocate the key name string 
         pwstrKeyName = (PWSTR)ExAllocatePool2(POOL_FLAG_NON_PAGED, kBasicInfo->NameLength + sizeof(WCHAR), MINADAPTER_POOLTAG);
-        IF_TRUE_ACTION_JUMP(kBasicInfo == NULL, ntStatus = STATUS_INSUFFICIENT_RESOURCES, loop_exit);
+        IF_TRUE_ACTION_JUMP(pwstrKeyName == NULL, ntStatus = STATUS_INSUFFICIENT_RESOURCES, loop_exit);
 
         // Copy the key name from the basic information struct
         RtlStringCbCopyNW(pwstrKeyName, kBasicInfo->NameLength + sizeof(WCHAR), kBasicInfo->Name, kBasicInfo->NameLength);
@@ -2651,6 +2653,7 @@ Return Value:
         if (pwstrKeyName)
         {
             ExFreePoolWithTag(pwstrKeyName, MINADAPTER_POOLTAG);
+            pwstrKeyName = NULL;
         }
 
         // Close the current source key
@@ -2686,7 +2689,7 @@ Exit:
     return ntStatus;
 }
 
-
+#pragma code_seg("PAGE")
 NTSTATUS CAdapterCommon::MigrateDeviceInterfaceTemplateParameters
 (
     _In_ PUNICODE_STRING    SymbolicLinkName,
@@ -2728,6 +2731,8 @@ Return Value:
     HANDLE              hTemplateDeviceInterfaceParametersKey(NULL);
     UNICODE_STRING      TemplateSymbolicLinkName;
     UNICODE_STRING      referenceString;
+
+    PAGED_CODE(); 
 
     RtlInitUnicodeString(&TemplateSymbolicLinkName, NULL);
     RtlInitUnicodeString(&referenceString, TemplateReferenceString);

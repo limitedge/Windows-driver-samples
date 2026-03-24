@@ -1,4 +1,4 @@
-﻿;
+;
 ; Copyright (c) Microsoft Corporation. All rights reserved.
 ;
 ; INF Name:
@@ -10,37 +10,29 @@
 ;     INF for installing the USB Connector Manager sample client driver for
 ;     UCSI-compatible systems.
 ;
+; Important:
+;     This INF depends on features for the Driver Store DIRIDs which are available starting Windows 10 1709
+;
 
 [Version]
 Signature="$WINDOWS NT$"
-;
-; For versions prior to Windows 10 version 1803, use:
-; Class=USB
-; ClassGuid={36FC9E60-C465-11CF-8056-444553540000}
-;
-; For versions from Windows 10 version 1803 or later, use:
-; Class=UCM
-; ClassGuid={E6F1AA1C-7F3B-4473-B2E8-C97D8AC71D53}
-;
 Class=UCM
-ClassGuid={E6F1AA1C-7F3B-4473-B2E8-C97D8AC71D53}
+ClassGuid={e6f1aa1c-7f3b-4473-b2e8-c97d8ac71d53}
 Provider=%ManufacturerName%
 CatalogFile=UcmCxUcsi.cat
-DriverVer= ; TODO: set DriverVer in stampinf property pages
 PnpLockdown = 1
 
 [DestinationDirs]
-DefaultDestDir = 12
-UcmCxUcsi_Device_CoInstaller_CopyFiles = 11
+DefaultDestDir = 13
 
 ;*****************************************
 ; Install Section
 ;*****************************************
 
 [Manufacturer]
-%ManufacturerName%=Standard,NT$ARCH$
+%ManufacturerName%=Standard,NT$ARCH$.10.0...16299
 
-[Standard.NT$ARCH$]
+[Standard.NT$ARCH$.10.0...16299]
 %UcmCxUcsi.DeviceDesc%=UcmCxUcsi_Device, ACPI\USBC000, ACPI\PNP0CA0 ; TODO: edit hw-id to match your device.
 
 [UcmCxUcsi_Device.NT]
@@ -59,28 +51,13 @@ DisplayName    = %UcmCxUcsi.SVCDESC%
 ServiceType    = 1               ; SERVICE_KERNEL_DRIVER
 StartType      = 3               ; SERVICE_DEMAND_START
 ErrorControl   = 1               ; SERVICE_ERROR_NORMAL
-ServiceBinary  = %12%\UcmCxUcsi.sys
+ServiceBinary  = %13%\UcmCxUcsi.sys
 Dependencies   = UcmCx
-
-;
-;--- UcmCxUcsi_Device Coinstaller installation ------
-;
-
-[UcmCxUcsi_Device.NT.CoInstallers]
-AddReg=UcmCxUcsi_Device_CoInstaller_AddReg
-CopyFiles=UcmCxUcsi_Device_CoInstaller_CopyFiles
-
-[UcmCxUcsi_Device_CoInstaller_AddReg]
-HKR,,CoInstallers32,0x00010000, "WdfCoInstaller$KMDFCOINSTALLERVERSION$.dll,WdfCoInstaller"
-
-[UcmCxUcsi_Device_CoInstaller_CopyFiles]
-WdfCoInstaller$KMDFCOINSTALLERVERSION$.dll
 
 [SourceDisksNames]
 3426 = windows cd
 
 [SourceDisksFiles]
-WdfCoInstaller$KMDFCOINSTALLERVERSION$.dll=1 ; make sure the number matches with SourceDisksNames
 UcmCxUcsi.sys = 3426
 
 [UcmCxUcsi_Device.NT.Wdf]
@@ -88,7 +65,6 @@ KmdfService =  UcmCxUcsi, UcmCxUcsi_wdfsect
 
 [UcmCxUcsi_wdfsect]
 KmdfLibraryVersion = $KMDFVERSION$
-
 
 [Strings]
 SPSVCINST_ASSOCSERVICE= 0x00000002

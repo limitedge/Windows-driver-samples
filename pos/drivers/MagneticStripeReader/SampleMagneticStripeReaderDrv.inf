@@ -18,42 +18,34 @@ SampleMagneticStripeReaderDrv.dll=1
 1 = %DiskName%
 
 [Manufacturer]
-%ManufacturerName%=Standard,NT$ARCH$
+%ManufacturerName%=Standard,NT$ARCH$.10.0...22000
 
-[Standard.NT$ARCH$]
-%DeviceName%=MyDevice_Install, Root\SampleMagneticStripeReaderDrv ;
+[Standard.NT$ARCH$.10.0...22000]
+%DeviceName%=MyDevice_Install, Root\SampleMagneticStripeReaderDrv
 
 ; =================== UMDF Device ==================================
 
 [MyDevice_Install.NT]
+Include=WUDFRD.inf
+Needs=WUDFRD.NT
 CopyFiles=UMDriverCopy
 
 [MyDevice_Install.NT.hw]
+Include=WUDFRD.inf
+Needs=WUDFRD.NT.HW
 
 [MyDevice_Install.NT.Services]
-AddService=WUDFRd,0x000001fa,WUDFRD_ServiceInstall
-
-[MyDevice_Install.NT.CoInstallers]
-AddReg=CoInstallers_AddReg
+Include=WUDFRD.inf
+Needs=WUDFRD.NT.Services
 
 [MyDevice_Install.NT.Wdf]
 UmdfService=SampleMagneticStripeReaderDrv,SampleMagneticStripeReaderDrv_Install
 UmdfServiceOrder=SampleMagneticStripeReaderDrv
 
 [SampleMagneticStripeReaderDrv_Install]
-UmdfLibraryVersion=2.15.0 
+UmdfLibraryVersion=2.15.0
 ServiceBinary=%12%\UMDF\SampleMagneticStripeReaderDrv.dll
 UmdfExtensions=PosCx0102
-
-[WUDFRD_ServiceInstall]
-DisplayName = %WudfRdDisplayName%
-ServiceType = 1
-StartType = 3
-ErrorControl = 1
-ServiceBinary = %12%\WUDFRd.sys
-
-[CoInstallers_AddReg]
-HKR,,CoInstallers32,0x00010000,"WUDFCoinstaller.dll"
 
 [DestinationDirs]
 UMDriverCopy=12,UMDF ; copy to drivers\umdf
@@ -66,5 +58,4 @@ SampleMagneticStripeReaderDrv.dll
 [Strings]
 ManufacturerName="TEST" ; TODO - Update name
 DiskName = "SampleMagneticStripeReaderDrv Installation Disk"
-WudfRdDisplayName="Windows Driver Foundation - User-mode Driver Framework Reflector"
 DeviceName="SampleMagneticStripeReaderDrv Device"

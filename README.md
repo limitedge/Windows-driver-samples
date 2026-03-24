@@ -32,6 +32,10 @@ The Windows Driver Frameworks (WDF) are a set of libraries that make it simple t
 
 Use the samples in this repo to guide your Windows driver development. Whether you're just getting started or porting an older driver to the newest version of Windows, code samples are valuable guides on how to write drivers.
 
+For information about important changes that need to be made to the WDK sample drivers before releasing device drivers based on the sample code, see the following topic:
+
+[From Sample Code to Production Driver - What to Change in the Samples](https://docs.microsoft.com/en-us/windows-hardware/drivers/gettingstarted/from-sample-code-to-production-driver)
+
 ### Build your first driver
 
 If you're writing your first driver, use these exercises to get started. Each exercise is independent of the others, so you can do them in any order.
@@ -41,6 +45,8 @@ If you're writing your first driver, use these exercises to get started. Each ex
 [Write a KMDF Hello World driver](https://docs.microsoft.com/windows-hardware/drivers/gettingstarted/writing-a-very-small-kmdf--driver)
 
 [Write a KMDF driver based on a template](https://docs.microsoft.com/windows-hardware/drivers/gettingstarted/writing-a-kmdf-driver-based-on-a-template)
+
+[Use GitHub Actions to build a simple driver project](.github/Build-with-GitHub.md)
 
 # Microsoft Code of Conduct
 

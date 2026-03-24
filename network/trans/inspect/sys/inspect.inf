@@ -21,7 +21,6 @@
    Inspect.sys = 1,,
 
 [DestinationDirs]
-    DefaultDestDir      = 12                                               ; %WinDir%\System32\Drivers
     Inspect.DriverFiles = 12                                               ; %WinDir%\System32\Drivers
 
 [DefaultInstall.NT$ARCH$]
@@ -30,15 +29,6 @@
 
 [DefaultInstall.NT$ARCH$.Services]
     AddService = %InspectServiceName%,,Inspect.Service
-
-[DefaultUninstall.NT$ARCH$]
-    LegacyUninstall = 1
-    DelFiles = Inspect.DriverFiles
-
-[DefaultUninstall.NT$ARCH$.Services]
-    LegacyUninstall = 1
-    DelService = %InspectServiceName%,0x200                                ; SPSVCINST_STOPSERVICE
-    DelReg     = Inspect.DelRegistry
 
 [Inspect.DriverFiles]
     Inspect.sys,,,0x00000040                                               ; COPYFLG_OVERWRITE_OLDER_ONLY
@@ -55,9 +45,6 @@
 [Inspect.AddRegistry]
     HKR,"Parameters","BlockTraffic",0x00010001,"0"                         ; FLG_ADDREG_TYPE_DWORD
     HKR,"Parameters","RemoteAddressToInspect",0x00000000,"10.0.0.1"        ; FLG_ADDREG_TYPE_SZ
-
-[Inspect.DelRegistry]
-    HKR,"Parameters",,,
 
 [Strings]
     ProviderString     = "TODO-Set-Provider"
